@@ -1,6 +1,8 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
+import { supabase } from "../lib/supabase";
+
 
 interface Recording {
   id: number;
@@ -27,6 +29,32 @@ export default function RecordPage() {
   const chunks = useRef<Blob[]>([]);
   const idCounter = useRef(0);
   const transcriptRef = useRef("");
+
+  // ✅ Load past recordings from Supabase when page loads
+  useEffect(() => {
+    const fetchRecordings = async () => {
+      const { data, error } = await supabase
+        .from("recordings")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (!error && data) {
+        setRecordings(
+          data.map((rec) => ({
+            id: rec.id,
+            url: rec.audio_url,
+            transcript: rec.transcript,
+            followUps: rec.followups,
+            timestamp: new Date(rec.created_at).toLocaleTimeString(),
+          }))
+        );
+      } else {
+        console.error("❌ Supabase fetch error:", error);
+      }
+    };
+
+    fetchRecordings();
+  }, []);
 
   const startRecording = async () => {
     try {
@@ -87,6 +115,15 @@ export default function RecordPage() {
         setRecordings((prev) => [...prev, newRecording]);
         setConversationHistory((prev) => [...prev, { role: "user", content: transcript }]);
 
+        // 🚀 TODO: Save to Supabase
+        await supabase.from("recordings").insert([
+          {
+            audio_url: url,
+            transcript,
+            followups: [],
+          },
+        ]);
+
         await generateFollowUps(newRecording.id, transcript);
       };
 
@@ -106,36 +143,43 @@ export default function RecordPage() {
 
   // ✅ Call API with conversation history
   const generateFollowUps = async (id: number, userInput: string) => {
-    setLoadingId(id);
-    try {
-      const res = await fetch("/api/followup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          history: [...conversationHistory, { role: "user", content: userInput }],
-        }),
-      });
+  setLoadingId(id);
+  try {
+    const res = await fetch("/api/followup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        history: [...conversationHistory, { role: "user", content: userInput }],
+      }),
+    });
 
-      const data = await res.json();
-      const aiQuestions =
-        data.questions?.split("\n").filter((q: string) => q.trim() !== "") || [];
+    const data = await res.json();
 
-      setRecordings((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, followUps: aiQuestions } : r))
-      );
+    // ✅ Fix here
+    const aiQuestions = Array.isArray(data.questions)
+      ? data.questions
+      : String(data.questions).split("\n").filter((q) => q.trim() !== "");
 
-      if (aiQuestions.length > 0) {
-        setConversationHistory((prev) => [
-          ...prev,
-          { role: "assistant", content: aiQuestions.join("\n") },
-        ]);
-      }
-    } catch (err) {
-      console.error("Follow-up error:", err);
-    } finally {
-      setLoadingId(null);
+    setRecordings((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, followUps: aiQuestions } : r))
+    );
+
+    // 🚀 Update Supabase followups
+    await supabase.from("recordings").update({ followups: aiQuestions }).eq("id", id);
+
+    if (aiQuestions.length > 0) {
+      setConversationHistory((prev) => [
+        ...prev,
+        { role: "assistant", content: aiQuestions.join("\n") },
+      ]);
     }
-  };
+  } catch (err) {
+    console.error("Follow-up error:", err);
+  } finally {
+    setLoadingId(null);
+  }
+};
+
 
   // 🔥 Handle when user clicks a follow-up question
   const handleFollowUpClick = async (question: string) => {
@@ -149,6 +193,14 @@ export default function RecordPage() {
 
     setRecordings((prev) => [...prev, newRecording]);
     setConversationHistory((prev) => [...prev, { role: "user", content: question }]);
+
+    await supabase.from("recordings").insert([
+      {
+        audio_url: "",
+        transcript: question,
+        followups: [],
+      },
+    ]);
 
     await generateFollowUps(newRecording.id, question);
   };
